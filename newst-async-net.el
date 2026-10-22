@@ -47,6 +47,12 @@
 ;; the first pass gives every backlogged host at most its fair share; the
 ;; second pass lets a host use otherwise idle slots, still subject to its own
 ;; congestion window.  This avoids both starvation and head-of-line blocking.
+;;
+;; Cache updates are applied to memory immediately, but SQLite writes are
+;; coalesced per feed and flushed in bounded batches when Emacs is idle.  New
+;; downloads yield to pending input, so a background refresh does not compete
+;; with typing, scrolling, or redisplay.  `newst-async-net-flush-cache' forces
+;; a durable write, and `kill-emacs-hook' flushes any remaining dirty feeds.
 
 ;;; Code:
 
@@ -154,6 +160,34 @@ to the current network conditions rather than to historical outliers."
 The fair share prevents one host with many feeds from occupying every slot.
 A second dispatch pass lets busy hosts use slots that other hosts cannot use."
   :type 'boolean
+  :group 'newst-async-net)
+
+(defcustom newst-async-net-defer-on-input t
+  "When non-nil, do not start new downloads while input is pending.
+In-flight requests continue, but dispatch is postponed briefly so typing,
+scrolling and other interactive commands are handled first.  This keeps a
+large background refresh from competing with reading."
+  :type 'boolean
+  :group 'newst-async-net)
+
+(defcustom newst-async-net-input-defer-delay 0.05
+  "Seconds to wait before retrying dispatch while input is pending."
+  :type 'number
+  :group 'newst-async-net)
+
+(defcustom newst-async-net-save-idle-delay 0.4
+  "Idle seconds before dirty feed caches are written to storage.
+Cache writes are coalesced and performed only when Emacs is idle, keeping
+SQLite transactions out of the interactive path.  Set to 0 to flush as soon
+as Emacs becomes idle."
+  :type 'number
+  :group 'newst-async-net)
+
+(defcustom newst-async-net-save-batch-size 16
+  "Maximum number of dirty feeds persisted by one idle flush.
+A smaller batch shortens each flush but may require more idle cycles for a
+large refresh."
+  :type 'integer
   :group 'newst-async-net)
 
 (defcustom newst-async-net-max-retries 1
@@ -497,6 +531,84 @@ When CREATE is non-nil, create the state if necessary."
 (defvar newst-async-net--dispatch-timer nil
   "Timer used to debounce dispatch requests.")
 
+;;; Cache persistence ------------------------------------------------------
+
+(defvar newst-async-net--dirty-feeds (make-hash-table :test 'equal)
+  "Feed names whose in-memory cache needs to be written to storage.")
+
+(defvar newst-async-net--save-timer nil
+  "Idle timer used to flush `newst-async-net--dirty-feeds'.")
+
+(defun newst-async-net--cancel-save-timer ()
+  "Cancel the pending idle save timer."
+  (when (timerp newst-async-net--save-timer)
+    (cancel-timer newst-async-net--save-timer))
+  (setq newst-async-net--save-timer nil))
+
+(defun newst-async-net--schedule-save ()
+  "Schedule a dirty-cache flush for the next idle period."
+  (unless (timerp newst-async-net--save-timer)
+    (setq newst-async-net--save-timer
+          (run-with-idle-timer
+           (max 0.0 (float newst-async-net-save-idle-delay))
+           nil #'newst-async-net--flush-dirty-feeds))))
+
+(defun newst-async-net--queue-feed-save (feed-name)
+  "Mark FEED-NAME as dirty and arrange an idle cache write."
+  (puthash feed-name t newst-async-net--dirty-feeds)
+  (newst-async-net--schedule-save))
+
+(defun newst-async-net--flush-dirty-feeds (&optional all)
+  "Persist dirty feed caches, up to one idle batch.
+When ALL is non-nil, persist every dirty feed.  Return the number of feeds
+written.  Errors are logged and the affected feed is dropped from the dirty
+set; a later fetch will mark it dirty again."
+  (newst-async-net--cancel-save-timer)
+  (let ((remaining (if all
+                       most-positive-fixnum
+                     (max 1 (or newst-async-net-save-batch-size 1))))
+        (names nil)
+        (saved 0))
+    (when (fboundp 'newsticker--cache-get-feed)
+      (maphash (lambda (name _)
+                 (when (> remaining 0)
+                   (push name names)
+                   (cl-decf remaining)))
+               newst-async-net--dirty-feeds)
+      (dolist (name names)
+        (remhash name newst-async-net--dirty-feeds)
+        (condition-case err
+            (let ((feed (newsticker--cache-get-feed name)))
+              (when feed
+                (newsticker--cache-save-feed feed)
+                (cl-incf saved)))
+          (error
+           (newst-async-net-debug "cache save failed for %s: %S"
+                                  name err)))))
+    (when (> (hash-table-count newst-async-net--dirty-feeds) 0)
+      (newst-async-net--schedule-save))
+    saved))
+
+(defun newst-async-net--flush-all-dirty-feeds ()
+  "Flush all dirty caches without signalling, for `kill-emacs-hook'."
+  (condition-case err
+      (newst-async-net--flush-dirty-feeds t)
+    (error
+     (newst-async-net-debug "final cache flush failed: %S" err))))
+
+(add-hook 'kill-emacs-hook #'newst-async-net--flush-all-dirty-feeds)
+
+(defun newst-async-net-flush-cache ()
+  "Persist all pending feed cache writes immediately.
+The scheduler normally coalesces writes and performs them when Emacs is idle;
+use this command when an immediate durable cache is required."
+  (interactive)
+  (let ((saved (newst-async-net--flush-dirty-feeds t)))
+    (when (called-interactively-p 'interactive)
+      (message "newst-async-net: saved %d feed%s"
+               saved (if (= saved 1) "" "s")))
+    saved))
+
 (defun newst-async-net--job-key (job)
   "Return the hash key for JOB."
   (cons (newst-async-net--job-feed job)
@@ -627,11 +739,12 @@ EXPECTED-MS is the expected latency of the job's host."
 
 ;;; Dispatch ---------------------------------------------------------------
 
-(defun newst-async-net--schedule-dispatch ()
-  "Arrange for a dispatch on the next event-loop turn."
+(defun newst-async-net--schedule-dispatch (&optional delay)
+  "Arrange for a dispatch on the next event-loop turn.
+DELAY defaults to 0.01 seconds."
   (unless (timerp newst-async-net--dispatch-timer)
     (setq newst-async-net--dispatch-timer
-          (run-at-time 0.01 nil #'newst-async-net--dispatch))))
+          (run-at-time (or delay 0.01) nil #'newst-async-net--dispatch))))
 
 (defun newst-async-net--enqueue (feed-name url &optional attempts)
   "Queue a download of URL for FEED-NAME.
@@ -678,25 +791,33 @@ ATTEMPTS is the number of retries already made."
   (when (timerp newst-async-net--dispatch-timer)
     (cancel-timer newst-async-net--dispatch-timer))
   (setq newst-async-net--dispatch-timer nil)
-  (let* ((now (newst-async-net--now))
-         (limit (newst-async-net--global-limit))
-         (ready (newst-async-net--ranked-ready-jobs now))
-         (hosts (newst-async-net--distinct-hosts ready)))
-    ;; First pass: guarantee each backlogged host its fair share.
-    ;; Second pass: fill slots that the fair-share pass could not use.
-    (dolist (pass '(fair fill))
-      (dolist (job ready)
-        (when (and (< newst-async-net--active limit)
-                   (< (newst-async-net--host-active
-                       (newst-async-net--job-host job))
-                      (newst-async-net--host-limit
-                       (newst-async-net--job-host job)
-                       limit hosts (eq pass 'fill))))
-          (newst-async-net--start job))))
-    (newst-async-net-debug "dispatch: active=%d/%d queued=%d"
-                           newst-async-net--active
-                           limit
-                           (hash-table-count newst-async-net--pending))))
+  (if (and newst-async-net-defer-on-input
+           (or (> newst-async-net--active 0)
+               (> (hash-table-count newst-async-net--pending) 0))
+           (input-pending-p))
+      (progn
+        (newst-async-net-debug "dispatch deferred: input pending")
+        (newst-async-net--schedule-dispatch
+         newst-async-net-input-defer-delay))
+    (let* ((now (newst-async-net--now))
+           (limit (newst-async-net--global-limit))
+           (ready (newst-async-net--ranked-ready-jobs now))
+           (hosts (newst-async-net--distinct-hosts ready)))
+      ;; First pass: guarantee each backlogged host its fair share.
+      ;; Second pass: fill slots that the fair-share pass could not use.
+      (dolist (pass '(fair fill))
+        (dolist (job ready)
+          (when (and (< newst-async-net--active limit)
+                     (< (newst-async-net--host-active
+                         (newst-async-net--job-host job))
+                        (newst-async-net--host-limit
+                         (newst-async-net--job-host job)
+                         limit hosts (eq pass 'fill))))
+            (newst-async-net--start job))))
+      (newst-async-net-debug "dispatch: active=%d/%d queued=%d"
+                             newst-async-net--active
+                             limit
+                             (hash-table-count newst-async-net--pending)))))
 
 ;;; Outcomes ---------------------------------------------------------------
 
@@ -868,7 +989,8 @@ NOW is the current time.  Client and parse errors are not congestion."
     (list title (or desc "") link time 'new pos nil nil extra)))
 
 (defun newst-async-net--process-result (feed-name items)
-  "Add parsed ITEMS to the in-memory cache and persist to SQLite."
+  "Add parsed ITEMS to the in-memory cache for FEED-NAME.
+Persistence is coalesced and performed later by an idle flush."
   (require 'newsticker)
   (let ((name-symbol (intern feed-name))
         (time (current-time)))
@@ -908,11 +1030,10 @@ NOW is the current time.  Client and parse errors are not congestion."
                                      name-symbol 'obsolete-new 'obsolete))
     (newsticker--update-process-ids)
     (setq newsticker--latest-update-time (current-time))
-    (condition-case save-err
-        (newsticker--cache-save-feed (newsticker--cache-get-feed name-symbol))
-      (error
-       (newst-async-net-debug "cache save failed for %s: %S"
-                              feed-name save-err)))
+    ;; Keep SQLite writes off the interactive path.  The in-memory cache is
+    ;; already up to date; persistence is coalesced and flushed when Emacs is
+    ;; idle, or immediately by `newst-async-net-flush-cache'.
+    (newst-async-net--queue-feed-save name-symbol)
     (when (fboundp 'newsticker--buffer-set-uptodate)
       (newsticker--buffer-set-uptodate nil))))
 

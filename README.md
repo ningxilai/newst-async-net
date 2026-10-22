@@ -39,6 +39,9 @@ of guessing from feed counts.
   hard cap.
 - **Retry with backoff** — transient failures are retried with exponential backoff
   and jitter, capped by `newst-async-net-max-retries` (default: one retry).
+- **Reading-friendly persistence** — in-memory cache updates stay immediate, but
+  SQLite writes are coalesced per feed and flushed in small batches while Emacs is
+  idle. New downloads also yield to pending input.
 - **Resilient cache** — the SQLite backend backs up a corrupt `cache.db` and
   rebuilds it from the legacy prin1 files.
 
@@ -58,6 +61,11 @@ The defaults are deliberately conservative and adaptive:
 (setq newst-async-net-timeout 15)
 (setq newst-async-net-timeout-hardcap 60)
 (setq newst-async-net-max-retries 1)
+
+(setq newst-async-net-defer-on-input t)
+(setq newst-async-net-input-defer-delay 0.05)
+(setq newst-async-net-save-idle-delay 0.4)
+(setq newst-async-net-save-batch-size 16)
 ```
 
 Ranking weights (seconds of staleness are the unit):
@@ -81,6 +89,24 @@ Inspect the current window, queue, p50/p95 and error rates with:
 ```text
 M-x newst-async-net-stats RET
 ```
+
+### Reading responsiveness
+
+Downloaded items enter the in-memory cache immediately, but their SQLite rows are
+written later.  A feed is marked dirty at most once, and while Emacs is idle up to
+`newst-async-net-save-batch-size` dirty feeds are persisted per flush; remaining
+feeds are rescheduled for the next idle period.  All pending writes are flushed on
+`kill-emacs`.  To persist immediately, run:
+
+```text
+M-x newst-async-net-flush-cache RET
+```
+
+When `newst-async-net-defer-on-input` is non-nil (the default), the scheduler does
+not start new downloads while keyboard, mouse, or scroll input is pending.
+In-flight downloads finish normally; dispatch is retried after
+`newst-async-net-input-defer-delay` seconds.  Set the option to `nil` to keep
+starting downloads during input.
 
 Disable autoscaling to use fixed limits:
 

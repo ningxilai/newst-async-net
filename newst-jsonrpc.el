@@ -258,4 +258,89 @@ latency is high or there are many feeds.")
         (goto-char (point-min))
         (newsticker--buffer-goto '(item))))))
 
-(functions and remaining content truncated for brevity in tool call
+
+(defun newst-jsonrpc--adjacent-feed (feeds cur &optional prev)
+  "Return feed adjacent to CUR in FEEDS.
+When PREV is non-nil, return the preceding feed (reverse navigation)."
+  (let* ((seq (if prev (reverse feeds) feeds))
+         (tail (member cur seq))
+         (next (if (cdr tail) (cadr tail) (car seq))))
+    (when next
+      (newst-jsonrpc-goto (car next) 0)
+      (point))))
+
+(defun newst-jsonrpc--next-feed ()
+  "Load next feed's first page.  Cyclic through URL list."
+  (let* ((feeds (append newsticker-url-list newsticker-url-list-defaults))
+         (cur (assoc-string newst-jsonrpc-feed-name feeds)))
+    (when cur
+      (newst-jsonrpc--adjacent-feed feeds cur))))
+
+(defun newst-jsonrpc--prev-feed ()
+  "Load previous feed's first page.  Cyclic through URL list."
+  (let* ((feeds (append newsticker-url-list newsticker-url-list-defaults))
+         (cur (assoc-string newst-jsonrpc-feed-name feeds)))
+    (when cur
+      (newst-jsonrpc--adjacent-feed feeds cur 'prev))))
+
+;; ----------------------------------------------------------------------
+;; Pager advice
+;; ----------------------------------------------------------------------
+
+(defun newst-jsonrpc-advice-insert-all (_orig-fn)
+  "Around advice for `newsticker--buffer-insert-all-items'.
+Load the first page of the first feed into the streaming buffer."
+  (let* ((feeds (append newsticker-url-list newsticker-url-list-defaults))
+         (first (car feeds)))
+    (if (null first)
+        (user-error "No feeds configured")
+      (newst-jsonrpc-goto (car first) 0)
+      (when (and (null newst-jsonrpc-page-content)
+                 (eq 0 newst-jsonrpc-total))
+        ;; feed exists but has 0 items — show empty page
+        (newst-jsonrpc--build-buffer)))))
+
+(defun newst-jsonrpc-advice-next-item
+    (orig-fn &optional do-not-wrap)
+  "Around advice for `newsticker-next-item'.
+When at last item, load next page from the cache."
+  (if (save-excursion (newsticker--buffer-goto '(item)))
+      (funcall orig-fn do-not-wrap)
+    (newst-jsonrpc-next-page)))
+
+(defun newst-jsonrpc-advice-prev-item
+    (orig-fn &optional do-not-wrap)
+  "Around advice for `newsticker-previous-item'.
+When at first item, load previous page from the cache."
+  (if (save-excursion (newsticker--buffer-goto '(item) t t))
+      (funcall orig-fn do-not-wrap)
+    (newst-jsonrpc-prev-page)))
+
+(defun newst-jsonrpc-advice-next-feed (orig-fn)
+  "Around advice for `newsticker-next-feed'.
+Load next feed's first page from the cache."
+  (ignore orig-fn)
+  (newst-jsonrpc--next-feed))
+
+(defun newst-jsonrpc-advice-prev-feed (orig-fn)
+  "Around advice for `newsticker-previous-feed'.
+Load previous feed's first page from the cache."
+  (ignore orig-fn)
+  (newst-jsonrpc--prev-feed))
+
+;; ----------------------------------------------------------------------
+;; Auto-install pager advice on load
+;; ----------------------------------------------------------------------
+
+(advice-add 'newsticker--buffer-insert-all-items :around
+            #'newst-jsonrpc-advice-insert-all)
+(advice-add 'newsticker-next-item :around
+            #'newst-jsonrpc-advice-next-item)
+(advice-add 'newsticker-previous-item :around
+            #'newst-jsonrpc-advice-prev-item)
+(advice-add 'newsticker-next-feed :around
+            #'newst-jsonrpc-advice-next-feed)
+(advice-add 'newsticker-previous-feed :around
+            #'newst-jsonrpc-advice-prev-feed)
+
+(provide 'newst-jsonrpc)

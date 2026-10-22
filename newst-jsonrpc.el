@@ -42,7 +42,7 @@ user has customized it explicitly."
   :type 'integer :group 'newst-jsonrpc)
 
 (defcustom newst-jsonrpc-stream-max-items 200
-  "Legacy/default trim limit. Adaptive mode derives the effective value." 
+  "Legacy/default trim limit. Adaptive mode derives the effective value."
   :type 'integer :group 'newst-jsonrpc)
 
 (defcustom newst-jsonrpc-auto-scale-enabled t
@@ -257,7 +257,6 @@ latency is high or there are many feeds.")
         (newst-jsonrpc--stream-prepend new-items)
         (goto-char (point-min))
         (newsticker--buffer-goto '(item))))))
-
 
 (defun newst-jsonrpc--adjacent-feed (feeds cur &optional prev)
   "Return feed adjacent to CUR in FEEDS.

@@ -2,8 +2,8 @@
 
 ;; Copyright (C) 2025-2026
 
-;; Author: emacs-stdio-jsonrpc contributors
-;; URL: https://github.com/ningxilai/newst-enhanced
+;; Author: Iris Lennon
+;; URL: https://github.com/ningxilai/newst-async-net
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: news, feed, newsticker

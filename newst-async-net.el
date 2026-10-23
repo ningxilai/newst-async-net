@@ -57,26 +57,17 @@
 ;;; Code:
 
 (require 'cl-lib)
-(require 'dom)
 (require 'url-parse)
 (require 'newst-async-net-sql)
 
 (eval-when-compile
   (require 'newsticker nil t))
 
-(declare-function newsticker--cache-add "newst-backend.el")
-(declare-function newsticker--cache-replace-age "newst-backend.el")
-(declare-function newsticker--cache-remove "newst-backend.el")
-(declare-function newsticker--cache-mark-expired "newst-backend.el")
+(defvar newst-async-net-sql--immediate-save)
+
 (declare-function newsticker--cache-get-feed "newst-backend.el")
 (declare-function newsticker--cache-save-feed "newst-backend.el")
-(declare-function newsticker--update-process-ids "newst-backend.el")
-(declare-function newsticker--buffer-set-uptodate "newst-plainview.el")
-(declare-function dom-by-tag "dom.el")
-(declare-function dom-tag "dom.el")
-(declare-function dom-text "dom.el")
-(declare-function dom-inner-text "dom.el")
-(declare-function dom-attr "dom.el")
+(declare-function newsticker--get-news-by-url-callback "newst-backend.el")
 
 (defgroup newst-async-net nil
   "Async feed download queue for Newsticker."
@@ -580,7 +571,8 @@ set; a later fetch will mark it dirty again."
         (condition-case err
             (let ((feed (newsticker--cache-get-feed name)))
               (when feed
-                (newsticker--cache-save-feed feed)
+                (let ((newst-async-net-sql--immediate-save t))
+                  (newsticker--cache-save-feed feed))
                 (cl-incf saved)))
           (error
            (newst-async-net-debug "cache save failed for %s: %S"
@@ -914,128 +906,29 @@ NOW is the current time.  Client and parse errors are not congestion."
            (unless (and last (> last failed-at))
              (newst-async-net--enqueue feed-name url attempts))))))))
 
-(defun newst-async-net--finish (job kind latency-ms)
-  "Finish JOB with outcome KIND and LATENCY-MS."
+(defun newst-async-net--finish (job kind latency-ms &optional status)
+  "Finish JOB with outcome KIND and LATENCY-MS.
+STATUS is passed to Newsticker's stock error reporting when this is the
+final failure of JOB."
   (let* ((host (newst-async-net--job-host job))
-         (key (newst-async-net--job-key job)))
+         (key (newst-async-net--job-key job))
+         (retry (unless (eq kind 'ok)
+                  (newst-async-net--maybe-retry job kind))))
     (remhash key newst-async-net--active-jobs)
     (setq newst-async-net--active (max 0 (1- newst-async-net--active)))
     (newst-async-net--host-release host)
     (newst-async-net--record-outcome host kind latency-ms)
     (if (eq kind 'ok)
         (puthash key (newst-async-net--now) newst-async-net--last-success)
-      (newst-async-net--maybe-retry job kind))
+      (when (and (null retry)
+                 (not (eq kind 'parse)))
+        (newst-async-net--report-failure
+         job (or status (list :error (list 'error kind))))))
     (newst-async-net-debug "finish %s: %s"
                            (newst-async-net--job-url job) kind)
     (newst-async-net--dispatch)))
 
 ;;; Fetching ---------------------------------------------------------------
-
-(defun newst-async-net--mime-strip ()
-  "Remove MIME headers from current buffer."
-  (goto-char (point-min))
-  (when (search-forward "\n\n" nil t)
-    (delete-region (point-min) (point))))
-
-(defun newst-async-net--dom-text (node)
-  "Return the textual content of NODE."
-  (if (fboundp 'dom-inner-text)
-      (dom-inner-text node)
-    (with-no-warnings (dom-text node))))
-
-(defun newst-async-net--extract-items (dom)
-  "Extract feed title and items from DOM."
-  (let* ((top (if (eq 'rss (dom-tag dom)) dom
-                (or (car (dom-by-tag dom 'feed)) dom)))
-         (is-atom (eq 'feed (dom-tag top)))
-         (top-for-title (if (and (not is-atom)
-                                 (eq 'rss (dom-tag top)))
-                            (car (dom-by-tag top 'channel))
-                          top))
-         (feed-title (let ((t-el (dom-by-tag top-for-title 'title)))
-                       (when t-el (newst-async-net--dom-text (car t-el)))))
-         (raw-items (if is-atom
-                        (dom-by-tag top 'entry)
-                      (dom-by-tag top 'item)))
-         (time (current-time))
-         (pos 0))
-    (list feed-title
-          (mapcar (lambda (item)
-                    (setq pos (1+ pos))
-                    (newst-async-net--item-to-list item is-atom time pos))
-                  raw-items))))
-
-(defun newst-async-net--item-to-list (item is-atom time pos)
-  (let* ((title-el (car (dom-by-tag item 'title)))
-         (title (if title-el (newst-async-net--dom-text title-el) "[untitled]"))
-         (desc (if is-atom
-                   (or (let ((c (car (dom-by-tag item 'content))))
-                         (and c (newst-async-net--dom-text c)))
-                       (let ((s (car (dom-by-tag item 'summary))))
-                         (and s (newst-async-net--dom-text s))))
-                 (let ((d (car (dom-by-tag item 'description))))
-                   (and d (newst-async-net--dom-text d)))))
-         (link (if is-atom
-                   (let ((l (car (dom-by-tag item 'link))))
-                     (if l (or (dom-attr l 'href) (newst-async-net--dom-text l)) ""))
-                 (let ((l (car (dom-by-tag item 'link))))
-                   (if l (newst-async-net--dom-text l) ""))))
-         (guid (if is-atom
-                   (let ((i (car (dom-by-tag item 'id))))
-                     (and i (newst-async-net--dom-text i)))
-                 (let ((g (car (dom-by-tag item 'guid))))
-                   (and g (newst-async-net--dom-text g)))))
-         (extra (when guid `((guid nil ,guid)))))
-    (list title (or desc "") link time 'new pos nil nil extra)))
-
-(defun newst-async-net--process-result (feed-name items)
-  "Add parsed ITEMS to the in-memory cache for FEED-NAME.
-Persistence is coalesced and performed later by an idle flush."
-  (require 'newsticker)
-  (let ((name-symbol (intern feed-name))
-        (time (current-time)))
-    (newsticker--cache-replace-age newsticker--cache
-                                   name-symbol 'new 'obsolete-new)
-    (newsticker--cache-replace-age newsticker--cache
-                                   name-symbol 'old 'obsolete-old)
-    (newsticker--cache-replace-age newsticker--cache
-                                   name-symbol 'feed 'obsolete-old)
-    (let* ((feed-entry (or (assoc feed-name newsticker-url-list)
-                           (assoc feed-name newsticker-url-list-defaults)))
-           (feed-url (and feed-entry (nth 1 feed-entry))))
-      (setq newsticker--cache
-            (newsticker--cache-add
-             newsticker--cache name-symbol
-             (or (car items) feed-name) "" (or feed-url "")
-             time 'feed 0 nil time 'feed)))
-    (dolist (item (cdr items))
-      (setq newsticker--cache
-            (newsticker--cache-add newsticker--cache name-symbol
-                                   (nth 0 item) (nth 1 item) (nth 2 item)
-                                   (nth 3 item) (nth 4 item) (nth 5 item)
-                                   (nth 8 item) time 'new)))
-    (newsticker--cache-replace-age newsticker--cache
-                                   name-symbol 'obsolete-old 'deleteme)
-    (newsticker--cache-remove newsticker--cache name-symbol 'deleteme)
-    (if (not newsticker-keep-obsolete-items)
-        (newsticker--cache-remove newsticker--cache name-symbol 'obsolete-new)
-      (setq newsticker--cache
-            (newsticker--cache-mark-expired
-             newsticker--cache name-symbol
-             'obsolete 'obsolete-expired
-             newsticker-obsolete-item-max-age))
-      (newsticker--cache-remove newsticker--cache
-                                name-symbol 'obsolete-expired)
-      (newsticker--cache-replace-age newsticker--cache
-                                     name-symbol 'obsolete-new 'obsolete))
-    (newsticker--update-process-ids)
-    (setq newsticker--latest-update-time (current-time))
-    ;; Keep SQLite writes off the interactive path.  The in-memory cache is
-    ;; already up to date; persistence is coalesced and flushed when Emacs is
-    ;; idle, or immediately by `newst-async-net-flush-cache'.
-    (newst-async-net--queue-feed-save name-symbol)
-    (when (fboundp 'newsticker--buffer-set-uptodate)
-      (newsticker--buffer-set-uptodate nil))))
 
 (defun newst-async-net--timeout-for (host)
   "Return the adaptive timeout in seconds for HOST."
@@ -1053,18 +946,22 @@ Persistence is coalesced and performed later by an idle flush."
                   (ceiling (+ 1.0 (* 2.5 (/ p95 1000.0))))))))))
 
 (defun newst-async-net--parse-and-process (job)
-  "Parse the current response buffer for JOB and process its items.
-Return `ok' on success, or `parse' when the response contains no feed."
-  (newst-async-net--mime-strip)
-  (let* ((dom (libxml-parse-xml-region (point-min) (point-max)))
-         (result (and dom (newst-async-net--extract-items dom))))
-    (if result
-        (progn
-          (newst-async-net--process-result
-           (newst-async-net--job-feed job)
-           (cons (newst-async-net--job-feed job) (cadr result)))
-          'ok)
-      'parse)))
+  "Parse and cache the current HTTP response for JOB.
+This delegates to Newsticker's own URL callback so feed formats, dates,
+retained elements, logos, coding systems, and cache semantics stay identical."
+  (newsticker--get-news-by-url-callback nil (newst-async-net--job-feed job))
+  'ok)
+
+(defun newst-async-net--report-failure (job status)
+  "Let Newsticker record its stock download-error entry for JOB.
+STATUS is the `url-retrieve' status list, or a synthesized timeout status."
+  (condition-case err
+      (with-temp-buffer
+        (newsticker--get-news-by-url-callback
+         status (newst-async-net--job-feed job)))
+    (error
+     (newst-async-net-debug "could not record download failure for %s: %S"
+                            (newst-async-net--job-feed job) err))))
 
 (defun newst-async-net--kill-url-buffer (buffer)
   "Kill BUFFER and its process, ignoring errors."
@@ -1086,7 +983,7 @@ Return `ok' on success, or `parse' when the response contains no feed."
          (url-buffer nil)
          (timer nil))
     (cl-labels
-        ((finish (kind latency-ms)
+        ((finish (kind latency-ms &optional status)
            (unless finished
              (setq finished t)
              (when (timerp timer)
@@ -1097,9 +994,10 @@ Return `ok' on success, or `parse' when the response contains no feed."
              (when (and (buffer-live-p url-buffer)
                         (not (eq (current-buffer) url-buffer)))
                (newst-async-net--kill-url-buffer url-buffer))
-             (newst-async-net--finish job kind latency-ms)))
+             (newst-async-net--finish job kind latency-ms status)))
          (handle (buf status)
-           (when (buffer-live-p buf)
+           (when (and (not finished)
+                      (buffer-live-p buf))
              (unwind-protect
                  (with-current-buffer buf
                  (let ((error-flag (plist-get status :error)))
@@ -1109,7 +1007,7 @@ Return `ok' on success, or `parse' when the response contains no feed."
                           "download error %s: %S" url error-flag)
                          (finish
                           (newst-async-net--classify-url-error error-flag)
-                          nil))
+                          nil status))
                      (condition-case parse-err
                          (let ((kind (newst-async-net--parse-and-process job)))
                            (finish
@@ -1130,7 +1028,7 @@ Return `ok' on success, or `parse' when the response contains no feed."
              timeout nil
              (lambda ()
                (newst-async-net-debug "timeout %s after %ss" url timeout)
-               (finish 'timeout nil))))
+               (finish 'timeout nil (list :error '(error timeout))))))
       (condition-case err
           (setq url-buffer
                 (let ((coding-system-for-read 'no-conversion))
@@ -1141,10 +1039,12 @@ Return `ok' on success, or `parse' when the response contains no feed."
                    nil t)))
         (error
          (newst-async-net-debug "url-retrieve failed %s: %S" url err)
-         (finish 'network nil))))))
+         (finish 'network nil (list :error err)))))))
+
 (defun newst-async-net-advice-get-news-by-url (_orig-fn feed-name url)
   ":around advice for `newsticker--get-news-by-url'."
   (newst-async-net--enqueue feed-name url)
+  (force-mode-line-update)
   nil)
 
 (advice-add 'newsticker--get-news-by-url :around

@@ -7,7 +7,6 @@ Enhanced Newsticker: adaptive, high-throughput feed handling with a stock-like e
 ```elisp
 (require 'newsticker)
 (require 'newst-async-net)
-(require 'newst-async-net-jsonrpc)
 ```
 
 Then:
@@ -22,6 +21,11 @@ M-x newsticker-plainview RET
 `newst-async-net` keeps the bare `newsticker` feel in normal use, but replaces the
 download queue with a demand-driven scheduler that measures the connection instead
 of guessing from feed counts.
+
+It is a drop-in backend: stock Newsticker commands, key bindings, buffer layout,
+feed parsing, item ages, logos, and cache semantics are unchanged.  Loading the
+package does not add a mode, replace plainview, or change navigation; the only
+user-visible difference is smoother background refreshing.
 
 - **Latency model** — a time-decayed, log-spaced histogram (96 buckets, 1 ms–120 s,
   300 s half-life) provides robust p50/p95 estimates. Failures and timeouts are
@@ -52,7 +56,6 @@ The defaults are deliberately conservative and adaptive:
 
 ```elisp
 (setq newst-async-net-auto-scale-enabled t)
-(setq newst-jsonrpc-auto-scale-enabled t)
 
 (setq newst-async-net-min-concurrent 2)
 (setq newst-async-net-hardcap-global 128)
@@ -113,7 +116,6 @@ Disable autoscaling to use fixed limits:
 
 ```elisp
 (setq newst-async-net-auto-scale-enabled nil)
-(setq newst-jsonrpc-auto-scale-enabled nil)
 (setq newst-async-net-max-concurrent 3)
 ```
 
@@ -123,15 +125,15 @@ an explicit upper bound; otherwise the global hard cap is the upper bound.
 ## Files
 
 - `newst-async-net.el` — main entry; priority queue, latency statistics, AIMD, and async fetch
-- `newst-async-net-jsonrpc.el` — streaming plainview reader
 - `newst-async-net-sql.el` — SQLite cache and recovery layer
 
 ## Migration note
 
-The package was previously referred to as `newst-enhanced` and its components as
-`newst-jsonrpc.el` and `newst-sql.el`.  The package name now matches the main file;
-the component features are `newst-async-net-jsonrpc` and `newst-async-net-sql`.
-Update any old `require` forms accordingly.
+The package was previously referred to as `newst-enhanced`, and its components as
+`newst-jsonrpc.el` and `newst-sql.el`.  The package name now matches the main file,
+and the SQLite component is `newst-async-net-sql`.  The custom plainview pager has
+been removed so the package stays a drop-in replacement for stock Newsticker; use
+the normal `M-x newsticker-plainview` interface.
 
 ## Design goal
 

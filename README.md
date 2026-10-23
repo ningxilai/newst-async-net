@@ -1,4 +1,4 @@
-# newst-enhanced
+# newst-async-net
 
 Enhanced Newsticker: adaptive, high-throughput feed handling with a stock-like experience under light load.
 
@@ -6,7 +6,8 @@ Enhanced Newsticker: adaptive, high-throughput feed handling with a stock-like e
 
 ```elisp
 (require 'newsticker)
-(require 'newst-jsonrpc)
+(require 'newst-async-net)
+(require 'newst-async-net-jsonrpc)
 ```
 
 Then:
@@ -18,7 +19,7 @@ M-x newsticker-plainview RET
 
 ## What it does
 
-`newst-enhanced` keeps the bare `newsticker` feel in normal use, but replaces the
+`newst-async-net` keeps the bare `newsticker` feel in normal use, but replaces the
 download queue with a demand-driven scheduler that measures the connection instead
 of guessing from feed counts.
 
@@ -121,9 +122,16 @@ an explicit upper bound; otherwise the global hard cap is the upper bound.
 
 ## Files
 
-- `newst-jsonrpc.el` — streaming plainview reader
-- `newst-async-net.el` — priority queue, latency statistics, AIMD, and async fetch
-- `newst-sql.el` — SQLite cache and recovery layer
+- `newst-async-net.el` — main entry; priority queue, latency statistics, AIMD, and async fetch
+- `newst-async-net-jsonrpc.el` — streaming plainview reader
+- `newst-async-net-sql.el` — SQLite cache and recovery layer
+
+## Migration note
+
+The package was previously referred to as `newst-enhanced` and its components as
+`newst-jsonrpc.el` and `newst-sql.el`.  The package name now matches the main file;
+the component features are `newst-async-net-jsonrpc` and `newst-async-net-sql`.
+Update any old `require` forms accordingly.
 
 ## Design goal
 

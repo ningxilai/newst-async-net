@@ -1,12 +1,6 @@
-;;; newst-sql.el --- SQLite cache backend for Newsticker  -*- lexical-binding: t; -*-
+;;; newst-async-net-sql.el --- SQLite cache backend for Newsticker -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025-2026
-
-;; Author: emacs-stdio-jsonrpc contributors
-;; URL: https://github.com/anomalyco/emacs-stdio-jsonrpc
-;; Version: 0.1.0
-;; Package-Requires: ((emacs "29.1"))
-;; Keywords: news, feed, newsticker
 
 ;; SPDX-License-Identifier: MIT
 
@@ -313,5 +307,5 @@ as returned by `current-time' on newer Emacs, plain numbers, or nil."
 (advice-add 'newsticker--cache-read :override #'newst-sql-read)
 (advice-add 'newsticker--cache-save-feed :override #'newst-sql-save-feed)
 
-(provide 'newst-sql)
-;;; newst-sql.el ends here
+(provide 'newst-async-net-sql)
+;;; newst-async-net-sql.el ends here

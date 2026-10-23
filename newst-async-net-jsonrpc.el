@@ -1,12 +1,6 @@
-;;; newst-jsonrpc.el --- Streaming plainview pager for Newsticker  -*- lexical-binding: t; -*-
+;;; newst-async-net-jsonrpc.el --- Streaming plainview pager for Newsticker -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025-2026
-
-;; Author: emacs-stdio-jsonrpc contributors
-;; URL: https://github.com/anomalyco/emacs-stdio-jsonrpc
-;; Version: 0.2.0
-;; Package-Requires: ((emacs "29.1"))
-;; Keywords: news, feed, newsticker
 
 ;; SPDX-License-Identifier: MIT
 
@@ -342,4 +336,5 @@ Load previous feed's first page from the cache."
 (advice-add 'newsticker-previous-feed :around
             #'newst-jsonrpc-advice-prev-feed)
 
-(provide 'newst-jsonrpc)
+(provide 'newst-async-net-jsonrpc)
+;;; newst-async-net-jsonrpc.el ends here

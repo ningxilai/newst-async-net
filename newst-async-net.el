@@ -3,7 +3,7 @@
 ;; Copyright (C) 2025-2026
 
 ;; Author: emacs-stdio-jsonrpc contributors
-;; URL: https://github.com/anomalyco/emacs-stdio-jsonrpc
+;; URL: https://github.com/ningxilai/newst-enhanced
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: news, feed, newsticker
@@ -59,7 +59,7 @@
 (require 'cl-lib)
 (require 'dom)
 (require 'url-parse)
-(require 'newst-sql)
+(require 'newst-async-net-sql)
 
 (eval-when-compile
   (require 'newsticker nil t))
